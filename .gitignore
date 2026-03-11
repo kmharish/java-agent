@@ -1,0 +1,23 @@
+# Ephemeral files (written during evolution, not committed)
+SESSION_PLAN.md
+ISSUES_TODAY.md
+ISSUE_RESPONSE.md
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Build
+target/
+build/
+*.class
+*.jar
+
+# Environment
+.env
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

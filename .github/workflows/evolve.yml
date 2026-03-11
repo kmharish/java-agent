@@ -1,0 +1,49 @@
+name: evolve
+
+on:
+  schedule:
+    # Every 8 hours: midnight, 8am, 4pm UTC
+    - cron: '0 0,8,16 * * *'
+  workflow_dispatch:  # Manual trigger
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  evolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Setup Git
+        run: |
+          git config user.name "java-agent[bot]"
+          git config user.email "java-agent[bot]@users.noreply.github.com"
+
+      - name: Run evolution cycle
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MODEL: sonnet
+        run: |
+          chmod +x scripts/evolve.sh
+          ./scripts/evolve.sh
