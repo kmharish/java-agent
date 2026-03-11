@@ -10,16 +10,18 @@
 #   REPO       — GitHub repo (default: auto-detect from git remote)
 #   MODEL      — Claude model (default: sonnet)
 #   TIMEOUT    — Planning phase timeout in seconds (default: 1200)
-#   FORCE_RUN  — Set to "true" to bypass bonus-run gate
 
-set -euo pipefail
+set -uo pipefail  # no -e: we handle errors ourselves
 
 # --- Configuration ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TARGET_DIR="${1:-$PROJECT_ROOT}"
 
-REPO="${REPO:-$(cd "$PROJECT_ROOT" && git remote get-url origin 2>/dev/null | sed 's/.*github.com[:/]\(.*\)\.git/\1/' || echo "")}"
+# Always work from project root
+cd "$PROJECT_ROOT"
+
+REPO="${REPO:-$(git remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]\(.*\)\.git|\1|' | sed 's|.*github.com[:/]\(.*\)$|\1|' || echo "")}"
 MODEL="${MODEL:-sonnet}"
 TIMEOUT="${TIMEOUT:-1200}"
 BIRTH_DATE="2026-03-11"
@@ -48,22 +50,19 @@ if ! command -v claude &>/dev/null; then
     exit 1
 fi
 
-# --- Step 1: Detect build system ---
-cd "$TARGET_DIR"
-
+# --- Step 1: Detect build system in target dir ---
 BUILD_CMD=""
 TEST_CMD=""
-FMT_CMD=""
-if [ -f "pom.xml" ]; then
-    WRAPPER=$([ -f "mvnw" ] && echo "./mvnw" || echo "mvn")
-    BUILD_CMD="$WRAPPER clean compile -q"
-    TEST_CMD="$WRAPPER test -q"
-    echo "→ Build system: Maven ($WRAPPER)"
-elif [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
-    WRAPPER=$([ -f "gradlew" ] && echo "./gradlew" || echo "gradle")
-    BUILD_CMD="$WRAPPER clean build -q"
-    TEST_CMD="$WRAPPER test -q"
-    echo "→ Build system: Gradle ($WRAPPER)"
+if [ -f "$TARGET_DIR/pom.xml" ]; then
+    WRAPPER=$([ -f "$TARGET_DIR/mvnw" ] && echo "$TARGET_DIR/mvnw" || echo "mvn")
+    BUILD_CMD="$WRAPPER -f $TARGET_DIR/pom.xml clean compile -q"
+    TEST_CMD="$WRAPPER -f $TARGET_DIR/pom.xml test -q"
+    echo "→ Build system: Maven"
+elif [ -f "$TARGET_DIR/build.gradle" ] || [ -f "$TARGET_DIR/build.gradle.kts" ]; then
+    WRAPPER=$([ -f "$TARGET_DIR/gradlew" ] && echo "$TARGET_DIR/gradlew" || echo "gradle")
+    BUILD_CMD="$WRAPPER -p $TARGET_DIR clean build -q"
+    TEST_CMD="$WRAPPER -p $TARGET_DIR test -q"
+    echo "→ Build system: Gradle"
 else
     echo "→ No Java build system detected (skills-only evolution)"
 fi
@@ -71,7 +70,7 @@ fi
 # --- Step 2: Verify starting state ---
 if [ -n "$BUILD_CMD" ]; then
     echo "→ Checking build..."
-    if $BUILD_CMD && $TEST_CMD; then
+    if $BUILD_CMD 2>/dev/null && $TEST_CMD 2>/dev/null; then
         echo "  Build: OK"
     else
         echo "  Build: FAILED (agent will try to fix)"
@@ -80,10 +79,11 @@ fi
 echo ""
 
 # --- Step 3: Fetch GitHub issues ---
-cd "$PROJECT_ROOT"
-ISSUES_FILE="ISSUES_TODAY.md"
+ISSUES_FILE="$PROJECT_ROOT/ISSUES_TODAY.md"
 SPONSORS_FILE="/tmp/sponsor_logins.json"
 echo "[]" > "$SPONSORS_FILE"
+SELF_ISSUES=""
+PENDING_REPLIES=""
 
 if [ -n "$REPO" ] && command -v gh &>/dev/null; then
     echo "→ Fetching community issues..."
@@ -94,8 +94,9 @@ if [ -n "$REPO" ] && command -v gh &>/dev/null; then
         --json number,title,body,labels,reactionGroups,author \
         > /tmp/issues_raw.json 2>/dev/null || echo "[]" > /tmp/issues_raw.json
 
-    python3 scripts/format_issues.py /tmp/issues_raw.json "$SPONSORS_FILE" "$DAY" > "$ISSUES_FILE" 2>/dev/null || echo "No issues found." > "$ISSUES_FILE"
-    echo "  $(grep -c '^### Issue' "$ISSUES_FILE" 2>/dev/null || echo 0) issues loaded."
+    python3 "$PROJECT_ROOT/scripts/format_issues.py" /tmp/issues_raw.json "$SPONSORS_FILE" "$DAY" > "$ISSUES_FILE" 2>/dev/null || echo "No issues found." > "$ISSUES_FILE"
+    ISSUE_COUNT=$(grep -c '^### Issue' "$ISSUES_FILE" 2>/dev/null || echo 0)
+    echo "  $ISSUE_COUNT issues loaded."
 
     # Fetch self-issues
     SELF_ISSUES=$(gh issue list --repo "$REPO" --state open \
@@ -103,11 +104,11 @@ if [ -n "$REPO" ] && command -v gh &>/dev/null; then
         --json number,title,body \
         --jq '.[] | "### Issue #\(.number): \(.title)\n\(.body)\n"' 2>/dev/null || true)
     if [ -n "$SELF_ISSUES" ]; then
-        echo "  $(echo "$SELF_ISSUES" | grep -c '^### Issue') self-issues loaded."
+        SELF_COUNT=$(echo "$SELF_ISSUES" | grep -c '^### Issue' || echo 0)
+        echo "  $SELF_COUNT self-issues loaded."
     fi
 
     # Scan for pending replies
-    PENDING_REPLIES=""
     REPLY_ISSUES=$(gh issue list --repo "$REPO" --state open \
         --label "agent-input,agent-self" \
         --limit 30 \
@@ -141,24 +142,21 @@ for issue in data:
     REPLY_COUNT=$(echo "$PENDING_REPLIES" | grep -c '^### Issue' 2>/dev/null || true)
     echo "  ${REPLY_COUNT:-0} pending replies."
 else
-    echo "No issues available (gh CLI not installed or no repo)." > "$ISSUES_FILE"
-    SELF_ISSUES=""
-    PENDING_REPLIES=""
+    echo "→ Skipping issues (gh CLI not installed or no repo configured)."
+    echo "No issues available." > "$ISSUES_FILE"
 fi
 echo ""
 
 # --- Use timeout command (macOS: gtimeout, Linux: timeout) ---
-TIMEOUT_CMD="timeout"
-if ! command -v timeout &>/dev/null; then
-    if command -v gtimeout &>/dev/null; then
-        TIMEOUT_CMD="gtimeout"
-    else
-        TIMEOUT_CMD=""
-    fi
+TIMEOUT_CMD=""
+if command -v timeout &>/dev/null; then
+    TIMEOUT_CMD="timeout"
+elif command -v gtimeout &>/dev/null; then
+    TIMEOUT_CMD="gtimeout"
 fi
 
 # --- Step 4: Phase A — Planning ---
-SESSION_START_SHA=$(git rev-parse HEAD)
+SESSION_START_SHA=$(git rev-parse HEAD 2>/dev/null || echo "none")
 echo "→ Phase A: Planning..."
 
 PLAN_PROMPT="You are java-agent, a self-evolving AI for Java/Spring Boot development. Today is Day $DAY ($DATE $SESSION_TIME).
@@ -219,7 +217,7 @@ Then STOP. Planning only."
 
 ${TIMEOUT_CMD:+$TIMEOUT_CMD "$TIMEOUT"} claude -p "$PLAN_PROMPT" \
     --model "$MODEL" \
-    --allowedTools "Bash(git *),Bash(cat *),Bash(ls *),Read,Write,Edit,Glob,Grep" \
+    --dangerously-skip-permissions \
     --max-turns 30 \
     --output-format text 2>&1 || true
 
@@ -254,7 +252,7 @@ while IFS= read -r task_line; do
     task_title="${task_line#*: }"
     echo "  → Task $TASK_NUM: $task_title"
 
-    PRE_TASK_SHA=$(git rev-parse HEAD)
+    PRE_TASK_SHA=$(git rev-parse HEAD 2>/dev/null || echo "none")
 
     # Extract task block
     TASK_DESC=$(awk "/^### Task $TASK_NUM:/{found=1} found{if(/^### / && !/^### Task $TASK_NUM:/)exit; print}" SESSION_PLAN.md)
@@ -288,19 +286,21 @@ Rules:
     TASK_OK=true
 
     # Check protected files
-    PROTECTED_CHANGES=$(git diff --name-only "$PRE_TASK_SHA"..HEAD -- \
-        .github/workflows/ IDENTITY.md PERSONALITY.md \
-        scripts/evolve.sh scripts/format_issues.py 2>/dev/null || true)
+    if [ "$PRE_TASK_SHA" != "none" ]; then
+        PROTECTED_CHANGES=$(git diff --name-only "$PRE_TASK_SHA"..HEAD -- \
+            .github/workflows/ IDENTITY.md PERSONALITY.md \
+            scripts/evolve.sh scripts/format_issues.py scripts/build_site.py 2>/dev/null || true)
 
-    if [ -n "$PROTECTED_CHANGES" ]; then
-        echo "    BLOCKED: Modified protected files: $PROTECTED_CHANGES"
-        TASK_OK=false
+        if [ -n "$PROTECTED_CHANGES" ]; then
+            echo "    BLOCKED: Modified protected files: $PROTECTED_CHANGES"
+            TASK_OK=false
+        fi
     fi
 
     # Revert if verification failed
     if [ "$TASK_OK" = false ]; then
         echo "    Reverting Task $TASK_NUM"
-        git reset --hard "$PRE_TASK_SHA"
+        git reset --hard "$PRE_TASK_SHA" 2>/dev/null || true
         git clean -fd 2>/dev/null || true
         TASK_FAILURES=$((TASK_FAILURES + 1))
 
@@ -335,7 +335,7 @@ if [ ! -f ISSUE_RESPONSE.md ] && grep -qi '^### Issue Responses' SESSION_PLAN.md
         elif echo "$resp_line" | grep -qi 'partial'; then
             status="partial"
         elif echo "$resp_line" | grep -qi 'implement'; then
-            if git log --oneline "$SESSION_START_SHA"..HEAD --format="%s" | grep -qE "#${issue_num}([^0-9]|$)"; then
+            if [ "$SESSION_START_SHA" != "none" ] && git log --oneline "$SESSION_START_SHA"..HEAD --format="%s" 2>/dev/null | grep -qE "#${issue_num}([^0-9]|$)"; then
                 status="fixed"
             else
                 status="partial"
@@ -362,7 +362,11 @@ fi
 
 # --- Step 7: Journal entry ---
 echo "→ Writing journal entry..."
-COMMITS=$(git log --oneline "$SESSION_START_SHA"..HEAD --format="%s" | grep -v "session wrap-up\|session plan" | paste -sd ", " - || true)
+if [ "$SESSION_START_SHA" != "none" ]; then
+    COMMITS=$(git log --oneline "$SESSION_START_SHA"..HEAD --format="%s" 2>/dev/null | grep -v "session wrap-up\|session plan" | paste -sd ", " - || true)
+else
+    COMMITS=$(git log --oneline -5 --format="%s" 2>/dev/null | paste -sd ", " - || true)
+fi
 [ -z "$COMMITS" ] && COMMITS="no commits made"
 
 JOURNAL_PROMPT="You are java-agent. Day $DAY ($DATE $SESSION_TIME).
@@ -401,7 +405,11 @@ if ! grep -q "## Day $DAY.*$SESSION_TIME" JOURNAL.md 2>/dev/null; then
     git add JOURNAL.md && git commit -m "Day $DAY ($SESSION_TIME): journal entry" || true
 fi
 
-# --- Step 8: Post issue responses ---
+# --- Step 8: Build site ---
+echo "→ Building site..."
+python3 "$PROJECT_ROOT/scripts/build_site.py" 2>/dev/null || echo "  Site build skipped (build_site.py not found or failed)"
+
+# --- Step 9: Post issue responses ---
 process_issue_block() {
     local block="$1"
     local issue_num status comment
@@ -445,22 +453,22 @@ if [ -f ISSUE_RESPONSE.md ]; then
     rm -f ISSUE_RESPONSE.md
 fi
 
-# --- Step 9: Clean up and commit ---
-rm -f SESSION_PLAN.md
+# --- Step 10: Clean up and commit ---
+rm -f SESSION_PLAN.md ISSUES_TODAY.md
 git add -A
-if ! git diff --cached --quiet; then
-    git commit -m "Day $DAY ($SESSION_TIME): session wrap-up"
+if ! git diff --cached --quiet 2>/dev/null; then
+    git commit -m "Day $DAY ($SESSION_TIME): session wrap-up" || true
 fi
 
 # Tag
 TAG_NAME="day${DAY}-$(echo "$SESSION_TIME" | tr ':' '-')"
 git tag "$TAG_NAME" -m "Day $DAY evolution ($SESSION_TIME)" 2>/dev/null || true
 
-# --- Step 10: Push ---
+# --- Step 11: Push ---
 echo ""
 echo "→ Pushing..."
-git push || echo "  Push failed (maybe no remote or auth)"
-git push --tags || true
+git push 2>/dev/null || echo "  Push failed (maybe no remote or auth)"
+git push --tags 2>/dev/null || true
 
 echo ""
 echo "=== Day $DAY complete ==="
