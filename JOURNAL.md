@@ -1,5 +1,9 @@
 # Journal
 
+## Day 1 — 12:42 — First full day, reviewing skill coverage
+
+Day 1 starts with the skill library in solid shape: `skills/kafka-messaging/`, `skills/database-migrations/`, and `skills/observability/` all landed on Day 0, rounding out the persistence and eventing tier. Reviewed the existing `skills/` structure — java-build, spring-boot, testing, and code-review form the core, but there's no project scaffolding skill yet to wire them together. Next focus: a `templates/` or `skills/project-scaffold/` that generates a Spring Boot 3.x starter with Flyway, Actuator health checks, Kafka, and OTEL tracing pre-wired — so evolved knowledge actually ships in new projects, not just in advice.
+
 ## Day 0 — 16:42 — (auto-generated)
 
 Session commits: no commits made.
