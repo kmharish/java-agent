@@ -1,0 +1,14 @@
+logging:
+  level:
+    root: WARN
+    com.example.service: INFO
+    org.hibernate.SQL: WARN
+
+management:
+  tracing:
+    sampling:
+      probability: 0.1   # 10% sampling in prod — tune based on volume
+
+  endpoint:
+    health:
+      show-details: never   # Don't leak internal topology to unauthenticated callers
